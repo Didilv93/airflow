@@ -1,0 +1,142 @@
+x-airflow-common: &airflow-common
+  image: apache/airflow:3.2.0b2-python3.14
+  env_file:
+    - .env
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./config:/opt/airflow/config
+  depends_on:
+    postgres: 
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  # ---------------------------------------------------------------------------
+  # Infrastructure
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Airflow Init (one-shot)
+  # ---------------------------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+          bash -c "
+            airflow db migrate &&
+            airflow users create --username \"$${_AIRFLOW_WWW_USER_USERNAME}\" --password \"$${_AIRFLOW_WWW_USER_PASSWORD}\" --firstname Admin --lastname User --role Admin --email admin@example.com
+          "
+
+  # ---------------------------------------------------------------------------
+  # Airflow Webserver
+  # ---------------------------------------------------------------------------
+  webserver:
+    <<: *airflow-common
+    command: airflow api-server
+    restart: always
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Airflow Scheduler
+  # ---------------------------------------------------------------------------
+  scheduler:
+    <<: *airflow-common
+    command: airflow scheduler
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - 'airflow jobs check --job-type SchedulerJob --hostname "$$(hostname)"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Airflow Celery Worker
+  # ---------------------------------------------------------------------------
+  worker:
+    <<: *airflow-common
+    command: airflow celery worker
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./config:/opt/airflow/config
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - 'airflow celery inspect ping -d "celery@$${HOSTNAME}"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Celery Flower (optional monitoring UI)
+  # ---------------------------------------------------------------------------
+  flower:
+    <<: *airflow-common
+    command: airflow celery flower
+    restart: always
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+
+volumes:
+  postgres-data:
