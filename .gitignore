@@ -1,5 +1,4 @@
 postgres-data/
 logs/
 config/
-dags/
 plugins/
